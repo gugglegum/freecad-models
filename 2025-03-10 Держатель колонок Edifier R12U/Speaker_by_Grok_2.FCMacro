@@ -1,0 +1,304 @@
+import FreeCAD
+import Sketcher
+import Part
+import PartDesign
+from FreeCAD import Vector
+import math
+import uuid
+
+def add_polygon(sketch, vertices, lock_first_to_Y=True):
+    """
+    Версия ChatGPT o3
+    vertices — список FreeCAD.Vector в порядке обхода.
+    На скетч добавляются линии + базовые ограничения:
+      • Coincident на стыках
+      • DistanceX/Y, чтобы зафиксировать координаты
+    """
+    line_ids = []
+    n = len(vertices)
+
+    # линии
+    for i in range(n):
+        p1, p2 = vertices[i], vertices[(i + 1) % n]
+        line_ids.append(sketch.addGeometry(Part.LineSegment(p1, p2), False))
+
+    # соединения
+    for i in range(n):
+        sketch.addConstraint(
+            Sketcher.Constraint('Coincident', line_ids[i], 2, line_ids[(i + 1) % n], 1))
+
+    # координаты
+    for i, p in enumerate(vertices):
+        if not (lock_first_to_Y and i == 0):
+            sketch.addConstraint(Sketcher.Constraint('DistanceX', line_ids[i], 1, p.x))
+        sketch.addConstraint(Sketcher.Constraint('DistanceY', line_ids[i], 1, p.y))
+
+    if lock_first_to_Y:
+        sketch.addConstraint(Sketcher.Constraint('PointOnObject', line_ids[0], 1, -2))
+
+def make_extrude_body(sketch, name, length):
+    body = doc.addObject("PartDesign::Body", name + "Body")
+    body.addObject(sketch)
+    extrude = body.newObject("PartDesign::Pad", name + "Pad")
+    extrude.Profile = sketch
+    extrude.Length = length
+    extrude.Reversed = True
+    return body
+
+# Создание нового документа
+doc = FreeCAD.newDocument("SpeakerModel")
+
+# Угол наклона плоскостей (12 градусов от вертикали, то есть -78 градусов от горизонтали)
+angle_deg = -78
+angle_rad = math.radians(angle_deg)
+
+# Количество скетчей и расстояния между ними
+num_sketches = 6
+spacing_array = [16.5, 16.5, 16.5, 14.0, 7.5]
+adjusted_spacing_array = [spacing * math.cos(math.radians(12)) for spacing in spacing_array]
+
+# Массив данных для сплайнов (Sketch1–Sketch5)
+spline_data = [
+    {"points": [Vector(0, 62.10, 0), Vector(38, 54, 0), Vector(43.2, 0, 0), Vector(37.1, -58, 0), Vector(0, -59, 0)], "weights": [1, 1.6, 1, 2, 1]},
+    {"points": [Vector(0, 61, 0), Vector(36, 48, 0), Vector(41, -3.43, 0), Vector(35, -58, 0), Vector(0, -59, 0)], "weights": [1, 1.45, 1, 1.75, 1]},
+    {"points": [Vector(0, 58, 0), Vector(34, 42, 0), Vector(39, -6.86, 0), Vector(32, -58, 0), Vector(0, -59, 0)], "weights": [1, 1.3, 1, 1.5, 1]},
+    {"points": [Vector(0, 49, 0), Vector(30, 35, 0), Vector(35, -10.29, 0), Vector(27, -58, 0), Vector(0, -59, 0)], "weights": [1, 1.15, 1, 1.25, 1]},
+    {"points": [Vector(0, 30, 0), Vector(20, 24, 0), Vector(25, -13.3, 0), Vector(20, -50, 0), Vector(0, -54, 0)], "weights": [1, 1, 1, 1, 1]}
+]
+
+# Создаём тело
+body = doc.addObject("PartDesign::Body", "Body")
+
+# Создание скетчей внутри Body
+sketches = []
+for i in range(num_sketches):
+    sketch = body.newObject("Sketcher::SketchObject", f"Sketch{i+1}")
+    x_offset = sum(adjusted_spacing_array[:i]) if i > 0 else 0
+    rotation_y = FreeCAD.Rotation(Vector(0, 1, 0), angle_deg)
+    rotation_z = FreeCAD.Rotation(Vector(0, 0, 1), -90)
+    combined_rotation = rotation_y.multiply(rotation_z)
+    sketch.Placement = FreeCAD.Placement(Vector(x_offset, 0, 0), combined_rotation)
+    sketches.append(sketch)
+    
+    if i < 5:
+        points = spline_data[i]["points"]
+        weights = spline_data[i]["weights"]
+    else:
+        scale = 0.3
+        points = [(p * scale + Vector(0, -12)) for p in spline_data[4]["points"]]
+        weights = spline_data[4]["weights"]
+    
+    full_points = points.copy()
+    full_weights = weights.copy()
+    full_points.append(Vector(-points[3].x, points[3].y, 0))
+    full_points.append(Vector(-points[2].x, points[2].y, 0))
+    full_points.append(Vector(-points[1].x, points[1].y, 0))
+    full_weights.append(weights[3])
+    full_weights.append(weights[2])
+    full_weights.append(weights[1])
+    
+    circle_ids = []
+    for point, weight in zip(full_points, full_weights):
+        circle = Part.Circle(point, Vector(0, 0, 1), weight * (scale if i == 5 else 1))
+        circle_id = sketch.addGeometry(circle, True)
+        circle_ids.append(circle_id)
+    
+    spline = Part.BSplineCurve()
+    spline.setPeriodic()
+    spline.buildFromPoles(full_points, True, 3)
+    for j in range(len(full_weights)):
+        spline.setWeight(j + 1, full_weights[j])
+    spline_id = sketch.addGeometry(spline, False)
+    
+    for j, circle_id in enumerate(circle_ids):
+        sketch.addConstraint(Sketcher.Constraint('InternalAlignment:Sketcher::BSplineControlPoint', circle_id, 3, spline_id, j))
+    
+    sketch.addConstraint(Sketcher.Constraint('PointOnObject', circle_ids[0], 3, -2))
+    sketch.addConstraint(Sketcher.Constraint('PointOnObject', circle_ids[4], 3, -2))
+    if i < 5:
+        sketch.addConstraint(Sketcher.Constraint('DistanceY', circle_ids[0], 3, points[0].y))
+        sketch.addConstraint(Sketcher.Constraint('DistanceY', circle_ids[4], 3, points[4].y))
+        sketch.addConstraint(Sketcher.Constraint('DistanceX', circle_ids[2], 3, points[2].x))
+        sketch.addConstraint(Sketcher.Constraint('DistanceX', circle_ids[6], 3, -points[2].x))
+    else:
+        sketch.addConstraint(Sketcher.Constraint('DistanceY', circle_ids[0], 3, points[0].y))
+        sketch.addConstraint(Sketcher.Constraint('DistanceY', circle_ids[4], 3, points[4].y))
+        sketch.addConstraint(Sketcher.Constraint('DistanceX', circle_ids[2], 3, points[2].x))
+        sketch.addConstraint(Sketcher.Constraint('DistanceX', circle_ids[6], 3, -points[2].x))
+
+# Создаём аддитивный Loft
+loft = body.newObject("PartDesign::AdditiveLoft", "Loft")
+loft.Profile = sketches[0]
+loft.Sections = sketches[1:]
+loft.Ruled = False
+loft.Closed = False
+doc.recompute()
+
+# Извлекаем форму тела
+body_shape = body.Shape
+
+# Создаём внешнюю оболочку с фиксированной толщиной 2 мм
+offset_shape = body_shape.makeOffsetShape(2.0, 0.1, fill=False)
+scaled_body = doc.addObject("Part::Feature", "ScaledBody")
+scaled_body.Shape = offset_shape
+doc.recompute()
+
+# Вычитаем Body из ScaledBody
+holder = doc.addObject("Part::Cut", "Holder")
+holder.Base = scaled_body
+holder.Tool = body
+doc.recompute()
+
+# Создаём копию Sketch1 для использования в CutterBody
+cutter_sketch = doc.addObject("Sketcher::SketchObject", "CutterSketch")
+cutter_sketch.Placement = sketches[0].Placement
+
+cutter_sketch.Geometry = sketches[0].Geometry
+cutter_sketch.Constraints = sketches[0].Constraints
+
+old_geometry = cutter_sketch.Geometry.copy()
+points = spline_data[0]["points"]
+weights = spline_data[0]["weights"]
+full_points = points.copy()
+full_weights = weights.copy()
+full_points.append(Vector(-points[3].x, points[3].y, 0))
+full_points.append(Vector(-points[2].x, points[2].y, 0))
+full_points.append(Vector(-points[1].x, points[1].y, 0))
+full_weights.append(weights[3])
+full_weights.append(weights[2])
+full_weights.append(weights[1])
+
+cutter_sketch.delGeometries(list(range(len(old_geometry))))
+
+offset_distance = 2.0
+circle_indices = []
+spline_index = None
+
+offset_points = []
+for point in full_points:
+    if point.y > 0:
+        point.y -= offset_distance
+    if point.y < 0:
+        point.y += offset_distance
+    if point.x > 0:
+        point.x -= offset_distance
+    if point.x < 0:
+        point.x += offset_distance
+    offset_points.append(point)
+
+for point, weight in zip(offset_points, full_weights):
+    circle = Part.Circle(point, Vector(0, 0, 1), weight)
+    new_index = cutter_sketch.addGeometry(circle, True)
+    circle_indices.append(new_index)
+
+new_spline = Part.BSplineCurve()
+new_spline.setPeriodic()
+new_spline.buildFromPoles(offset_points, True, 3)
+for j in range(len(full_weights)):
+    new_spline.setWeight(j + 1, full_weights[j])
+spline_index = cutter_sketch.addGeometry(new_spline, False)
+
+for j in range(len(circle_indices)):
+    cutter_sketch.addConstraint(Sketcher.Constraint('InternalAlignment:Sketcher::BSplineControlPoint', circle_indices[j], 3, spline_index, j))
+
+cutter_sketch.addConstraint(Sketcher.Constraint('PointOnObject', circle_indices[0], 3, -2))
+cutter_sketch.addConstraint(Sketcher.Constraint('PointOnObject', circle_indices[4], 3, -2))
+cutter_sketch.addConstraint(Sketcher.Constraint('DistanceY', circle_indices[0], 3, offset_points[0].y))
+cutter_sketch.addConstraint(Sketcher.Constraint('DistanceY', circle_indices[4], 3, offset_points[4].y))
+cutter_sketch.addConstraint(Sketcher.Constraint('DistanceX', circle_indices[2], 3, offset_points[2].x))
+cutter_sketch.addConstraint(Sketcher.Constraint('DistanceX', circle_indices[6], 3, offset_points[6].x))
+
+cutter_body = doc.addObject("PartDesign::Body", "CutterBody")
+cutter_body.addObject(cutter_sketch)
+extrude = cutter_body.newObject("PartDesign::Pad", "CutterPad")
+extrude.Profile = cutter_sketch
+extrude.Length = 20
+doc.recompute()
+
+final_holder = doc.addObject("Part::Cut", "FinalHolder")
+final_holder.Base = holder
+final_holder.Tool = cutter_body
+doc.recompute()
+
+# Определяем вырезы
+cuts = [
+    {
+        "name": "TopCut",
+        "vertices": [
+            Vector(0, 10, 0),
+            Vector(50, 15, 0),
+            Vector(50, 70, 0),
+            Vector(-50, 70, 0),
+            Vector(-50, 15, 0),
+        ],
+        "lock_first_to_Y": True,
+        "depth": 40
+    },
+    {
+        "name": "BottomRightCut",
+        "vertices": [
+            Vector(0, -10, 0),
+            Vector(50, -15, 0),
+            Vector(50, -40, 0),
+            Vector(0, -30, 0),
+        ],
+        "lock_first_to_Y": True,
+        "depth": 40
+    },
+    {
+        "name": "BottomLeftCut",
+        "vertices": [
+            Vector(0, -10, 0),
+            Vector(-50, -15, 0),
+            Vector(-50, -40, 0),
+            Vector(0, -30, 0),
+        ],
+        "lock_first_to_Y": True,
+        "depth": 40
+    },
+    {
+        "name": "BottomCut",
+        "vertices": [
+            Vector(-10, -15, 0),
+            Vector(10, -15, 0),
+            Vector(10, -70, 0),
+            Vector(-10, -70, 0),
+        ],
+        "lock_first_to_Y": False,
+        "depth": 75
+    },
+]
+
+# Вычисляем вектор смещения вдоль нормали
+normal = Vector(-math.sin(angle_rad), 0, math.cos(angle_rad))  # Нормаль к плоскости Sketch1
+offset_distance = 2.2
+offset_vector = normal.multiply(offset_distance)  # Смещение на 2 мм в сторону от колонки
+
+# Выполняем серию вырезаний
+current_holder = final_holder
+for cut in cuts:
+    name = cut["name"]
+    sketch = doc.addObject("Sketcher::SketchObject", name + "Sketch")
+    # Копируем Placement из Sketch1
+    base_placement = sketches[0].Placement
+    # Применяем смещение вдоль нормали
+    new_position = base_placement.Base - offset_vector
+    sketch.Placement = FreeCAD.Placement(new_position, base_placement.Rotation)
+    
+    add_polygon(sketch, cut["vertices"], cut["lock_first_to_Y"])
+    cut_body = make_extrude_body(sketch, name, cut["depth"])
+    doc.recompute()
+    
+    # Вырезаем
+    new_holder = doc.addObject("Part::Cut", f"HolderAfter{name}")
+    new_holder.Base = current_holder
+    new_holder.Tool = cut_body
+    doc.recompute()
+    current_holder = new_holder
+
+# Переименовываем последний Holder как FinalHolderWithSupports
+current_holder.Label = "FinalHolderWithSupports"
+
+# Настройка вида
+FreeCADGui.ActiveDocument.ActiveView.viewLeft()
+FreeCADGui.ActiveDocument.ActiveView.fitAll()
