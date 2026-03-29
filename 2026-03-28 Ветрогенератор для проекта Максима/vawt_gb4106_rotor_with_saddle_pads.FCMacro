@@ -41,8 +41,10 @@ ARM_TO_HUB_OVERLAP = 3.0  # Насколько луч заходит в цент
 
 MOUNT_THICK = 5.0         # Толщина ответного криволинейного крепления на луче, мм
 MOUNT_CONTACT_GAP = 0.0   # Зазор между седлом и ответным креплением (0.0 => без зазора)
-MOUNT_HOLE_DIAMETER = 3.2 # Диаметр сквозного отверстия в креплении, мм
-MOUNT_HOLE_EXTRA_START = 0.8  # Насколько отверстие начинается "снаружи", мм
+MOUNT_HOLE_CLEAR_DIAMETER = 3.5   # Сквозной диаметр под винт M3 в ответном креплении, мм
+MOUNT_HOLE_HEAD_DIAMETER = 6.5    # Диаметр расточки под цилиндрическую головку DIN912 M3, мм
+MOUNT_HOLE_HEAD_DEPTH = 3.5       # Глубина расточки под головку (со внутренней стороны), мм
+MOUNT_HOLE_EXTRA_START = 2.0  # Запас вылета отверстия за внутреннюю поверхность для надежного вскрытия, мм
 MOUNT_HOLE_EXTRA_DEPTH = 0.8  # Насколько отверстие проходит дальше контактной поверхности, мм
 
 # ----------------------------------------------------------------------------
@@ -476,7 +478,9 @@ def make_mount_solid(phase_deg, z_center):
 
     shape = Part.makeLoft(wires, True, False)
 
-    # Два сквозных отверстия под винты в ответном креплении
+    # Два ступенчатых отверстия:
+    # 1) сквозной диаметр MOUNT_HOLE_CLEAR_DIAMETER
+    # 2) расточка со внутренней стороны диаметром MOUNT_HOLE_HEAD_DIAMETER
     for x_local in CHORD_OFFSETS:
         p_face, tang, inward = saddle_face_point(phase_deg, z_center, z_center, x_local)
         p_contact = v_add(p_face, v_scale(inward, MOUNT_CONTACT_GAP))
@@ -484,14 +488,23 @@ def make_mount_solid(phase_deg, z_center):
         hole_start = v_add(p_contact, v_scale(inward, MOUNT_THICK + MOUNT_HOLE_EXTRA_START))
         hole_dir = to_vec(v_scale(inward, -1.0))
 
-        hole = Part.makeCylinder(
-            MOUNT_HOLE_DIAMETER / 2.0,
+        clear_hole = Part.makeCylinder(
+            MOUNT_HOLE_CLEAR_DIAMETER / 2.0,
             MOUNT_THICK + MOUNT_HOLE_EXTRA_START + MOUNT_HOLE_EXTRA_DEPTH,
             to_vec(hole_start),
             hole_dir
         )
+        shape = shape.cut(clear_hole)
 
-        shape = shape.cut(hole)
+        head_depth = max(0.0, min(MOUNT_HOLE_HEAD_DEPTH, MOUNT_THICK))
+        if head_depth > 0.0:
+            head_hole = Part.makeCylinder(
+                MOUNT_HOLE_HEAD_DIAMETER / 2.0,
+                head_depth + MOUNT_HOLE_EXTRA_START,
+                to_vec(hole_start),
+                hole_dir
+            )
+            shape = shape.cut(head_hole)
 
     return shape
 
