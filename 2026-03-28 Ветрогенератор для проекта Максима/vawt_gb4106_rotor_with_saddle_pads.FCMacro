@@ -27,18 +27,23 @@ BLADE_EDGE_THICK = 0.5    # Толщина лопасти у кромок, мм
 TWIST_DEG = -60.0          # Общая закрутка лопасти от низа к верху, градусы
 
 # ----------------------------------------------------------------------------
-# Центральная ось, ступицы и лучи
+# Центральная ось, шайбы-ряды и лучи
 # ----------------------------------------------------------------------------
 SHAFT_RADIUS = 5.0        # Радиус центральной оси, мм (4 мм => диаметр 8 мм)
 SHAFT_HEIGHT = 260.0      # Высота центральной оси, мм
 
-HUB_RADIUS = 16.0         # Радиус верхней и нижней ступицы, мм
-HUB_THICK = 8.0           # Толщина ступицы по Z, мм
-HUB_Z = (-90.0, 90.0)     # Положение нижней и верхней ступицы по Z, мм
+HUB_RADIUS = 16.0         # Радиус центральной части каждой шайбы, мм
+HUB_THICK = 8.0           # Толщина каждой шайбы по Z, мм
 
-ARM_LEN = 55.0            # Длина луча от ступицы к лопасти, мм
-ARM_W = 8.0               # Ширина луча, мм
-ARM_H = 6.0               # Толщина луча по Z, мм
+ARM_W = 10.0              # Ширина луча, мм
+ARM_TO_PAD_OVERLAP = 2.0  # Насколько луч заходит в зону крепления седла, мм
+ARM_TO_HUB_OVERLAP = 3.0  # Насколько луч заходит в центральную шайбу, мм
+
+MOUNT_THICK = 5.0         # Толщина ответного криволинейного крепления на луче, мм
+MOUNT_CONTACT_GAP = 0.0   # Зазор между седлом и ответным креплением (0.0 => без зазора)
+MOUNT_HOLE_DIAMETER = 3.2 # Диаметр сквозного отверстия в креплении, мм
+MOUNT_HOLE_EXTRA_START = 0.8  # Насколько отверстие начинается "снаружи", мм
+MOUNT_HOLE_EXTRA_DEPTH = 0.8  # Насколько отверстие проходит дальше контактной поверхности, мм
 
 # ----------------------------------------------------------------------------
 # Точность аппроксимации лопасти
@@ -125,6 +130,7 @@ def clear_generated_objects(doc):
     prefixes = (
         "Blade_",
         "Hub_",
+        "HubRow_",
         "Arm_",
         "Shaft",
         PAD_PREFIX,
@@ -408,11 +414,165 @@ def make_marker_shape(phase_deg, z_center):
     return Part.makeCompound(markers)
 
 # ============================================================================
+# ГЕНЕРАЦИЯ ШАЙБ С ЛУЧАМИ И КРИВОЛИНЕЙНЫМИ КРЕПЛЕНИЯМИ
+# ============================================================================
+
+def saddle_face_point(phase_deg, z, z_center, x_local):
+    """
+    Точка на внешней стороне седла (со стороны центра ротора) на высоте z.
+    """
+    z0 = z_center - PAD_HEIGHT / 2.0
+    t_local = local_pad_thickness(z - z0)
+
+    p, tang, inward = blade_inner_surface_point(phase_deg, z, x_local)
+    p_inner = v_sub(p, v_scale(inward, PAD_EMBED))
+    p_face = v_add(p_inner, v_scale(inward, t_local))
+
+    return p_face, tang, inward
+
+
+def make_mount_section_wire(phase_deg, z, z_center, x_left, x_right):
+    """
+    Замкнутое сечение ответного крепления на луче.
+    Внутренняя сторона повторяет внешнюю сторону седла.
+    """
+    pts_contact = []
+    pts_outer = []
+
+    for i in range(PAD_NX):
+        a = float(i) / float(PAD_NX - 1)
+        x = x_left + (x_right - x_left) * a
+
+        p_face, tang, inward = saddle_face_point(phase_deg, z, z_center, x)
+        p_contact = v_add(p_face, v_scale(inward, MOUNT_CONTACT_GAP))
+        p_outer = v_add(p_contact, v_scale(inward, MOUNT_THICK))
+
+        pts_contact.append(to_vec(p_contact))
+        pts_outer.append(to_vec(p_outer))
+
+    poly = []
+    poly.extend(pts_contact)
+    poly.extend(reversed(pts_outer))
+    poly.append(pts_contact[0])
+
+    return Part.makePolygon(poly)
+
+
+def make_mount_solid(phase_deg, z_center):
+    """
+    Ответное крепление, которое садится на седло без зазора (при MOUNT_CONTACT_GAP = 0).
+    """
+    x_left = min(CHORD_OFFSETS) - PAD_X_MARGIN
+    x_right = max(CHORD_OFFSETS) + PAD_X_MARGIN
+
+    z0 = z_center - PAD_HEIGHT / 2.0
+    z1 = z_center + PAD_HEIGHT / 2.0
+
+    wires = []
+    for iz in range(PAD_NZ):
+        tz = float(iz) / float(PAD_NZ - 1)
+        z = z0 + (z1 - z0) * tz
+        wires.append(make_mount_section_wire(phase_deg, z, z_center, x_left, x_right))
+
+    shape = Part.makeLoft(wires, True, False)
+
+    # Два сквозных отверстия под винты в ответном креплении
+    for x_local in CHORD_OFFSETS:
+        p_face, tang, inward = saddle_face_point(phase_deg, z_center, z_center, x_local)
+        p_contact = v_add(p_face, v_scale(inward, MOUNT_CONTACT_GAP))
+
+        hole_start = v_add(p_contact, v_scale(inward, MOUNT_THICK + MOUNT_HOLE_EXTRA_START))
+        hole_dir = to_vec(v_scale(inward, -1.0))
+
+        hole = Part.makeCylinder(
+            MOUNT_HOLE_DIAMETER / 2.0,
+            MOUNT_THICK + MOUNT_HOLE_EXTRA_START + MOUNT_HOLE_EXTRA_DEPTH,
+            to_vec(hole_start),
+            hole_dir
+        )
+
+        shape = shape.cut(hole)
+
+    return shape
+
+
+def make_arm_shape(phase_deg, z_center):
+    """
+    Прямой луч от центральной шайбы к ответному креплению.
+    Длина вычисляется автоматически по текущей геометрии седла.
+    """
+    x_mid = 0.5 * (min(CHORD_OFFSETS) + max(CHORD_OFFSETS))
+    p_face, tang, inward = saddle_face_point(phase_deg, z_center, z_center, x_mid)
+    p_contact = v_add(p_face, v_scale(inward, MOUNT_CONTACT_GAP))
+    pad_overlap = max(0.0, min(ARM_TO_PAD_OVERLAP, MOUNT_THICK))
+    p_target = v_add(p_contact, v_scale(inward, MOUNT_THICK - pad_overlap))
+
+    target_radius = math.hypot(p_target[0], p_target[1])
+    arm_start_radius = max(0.0, HUB_RADIUS - ARM_TO_HUB_OVERLAP)
+    arm_len = max(1.0, target_radius - arm_start_radius)
+
+    arm = Part.makeBox(arm_len, ARM_W, HUB_THICK)
+    arm.translate(App.Vector(arm_start_radius, -ARM_W / 2.0, z_center - HUB_THICK / 2.0))
+
+    outward = v_scale(inward, -1.0)
+    angle_deg = math.degrees(math.atan2(outward[1], outward[0]))
+    arm.rotate(App.Vector(0, 0, 0), App.Vector(0, 0, 1), angle_deg)
+
+    return arm
+
+
+def make_hub_row_shape(z_center):
+    """
+    Создаёт одну шайбу-ряд: центр, три луча и три ответных крепления.
+    """
+    shapes = []
+    hub = Part.makeCylinder(
+        HUB_RADIUS,
+        HUB_THICK,
+        App.Vector(0, 0, z_center - HUB_THICK / 2.0),
+        App.Vector(0, 0, 1)
+    )
+    shapes.append(hub)
+
+    for blade_index in range(NUM_BLADES):
+        phase = blade_index * (360.0 / NUM_BLADES)
+        shapes.append(make_arm_shape(phase, z_center))
+        shapes.append(make_mount_solid(phase, z_center))
+
+    try:
+        fused = shapes[0].multiFuse(shapes[1:])
+    except Exception:
+        fused = shapes[0]
+        for shp in shapes[1:]:
+            fused = fused.fuse(shp)
+
+    try:
+        fused = fused.removeSplitter()
+    except Exception:
+        pass
+
+    return fused
+
+
+def build_hub_rows(doc):
+    """
+    Создаёт три шайбы-рядa по позициям ROW_ZS, чтобы они совпадали с рядами седел.
+    """
+    created = 0
+
+    for row_index, z_center in enumerate(ROW_ZS, start=1):
+        obj = doc.addObject("Part::Feature", "HubRow_%d" % row_index)
+        obj.Shape = make_hub_row_shape(z_center)
+        created += 1
+
+    return created
+
+# ============================================================================
 # ГЕНЕРАЦИЯ РОТОРА
 # ============================================================================
 
 def build_rotor(doc):
-    """Создаёт лопасти, ось, ступицы и лучи."""
+    """Создаёт лопасти и центральную ось."""
     # Лопасти
     for i in range(NUM_BLADES):
         phase = i * (360.0 / NUM_BLADES)
@@ -426,23 +586,6 @@ def build_rotor(doc):
     shaft.Radius = SHAFT_RADIUS
     shaft.Height = SHAFT_HEIGHT
     shaft.Placement.Base = App.Vector(0, 0, -SHAFT_HEIGHT / 2.0)
-
-    # Ступицы и лучи
-    for hub_index, z in enumerate(HUB_Z, start=1):
-        hub = doc.addObject("Part::Cylinder", "Hub_%d" % hub_index)
-        hub.Radius = HUB_RADIUS
-        hub.Height = HUB_THICK
-        hub.Placement.Base = App.Vector(0, 0, z - HUB_THICK / 2.0)
-
-        for blade_index in range(NUM_BLADES):
-            arm = doc.addObject("Part::Box", "Arm_%d_%d" % (hub_index, blade_index + 1))
-            arm.Length = ARM_LEN
-            arm.Width = ARM_W
-            arm.Height = ARM_H
-            arm.Placement.Base = App.Vector(0, -ARM_W / 2.0, z - ARM_H / 2.0)
-
-            angle_deg = blade_index * (360.0 / NUM_BLADES) + ((z + 90.0) / 180.0) * TWIST_DEG - 45.0
-            arm.Placement.Rotation = App.Rotation(App.Vector(0, 0, 1), angle_deg)
 
 # ============================================================================
 # ГЕНЕРАЦИЯ СЁДЕЛ
@@ -493,6 +636,7 @@ clear_generated_objects(doc)
 
 build_rotor(doc)
 created_saddles = build_saddles(doc)
+created_hub_rows = build_hub_rows(doc)
 
 doc.recompute()
 
@@ -504,3 +648,4 @@ except Exception:
 
 print("VAWT rotor created successfully.")
 print("Created %d saddle pads." % created_saddles)
+print("Created %d hub rows with curved mounts." % created_hub_rows)
