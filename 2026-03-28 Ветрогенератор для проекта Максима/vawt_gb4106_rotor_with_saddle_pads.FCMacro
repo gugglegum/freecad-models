@@ -1,0 +1,506 @@
+# -*- coding: utf-8 -*-
+import math
+import FreeCAD as App
+import Mesh
+import Part
+
+DOC_NAME = "VAWT_GB4106_Rotor"
+
+# ============================================================================
+# ПАРАМЕТРЫ РОТОРА
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Общая геометрия ротора
+# ----------------------------------------------------------------------------
+HEIGHT = 220.0            # Полная высота ротора по оси Z, мм
+NUM_BLADES = 3            # Количество лопастей
+
+# ----------------------------------------------------------------------------
+# Геометрия лопасти
+# ----------------------------------------------------------------------------
+BLADE_RADIUS = 72.0       # Расстояние от оси ротора до центра сечения лопасти, мм
+BLADE_CHORD = 44.0        # Ширина сечения лопасти по локальной хорде, мм
+BLADE_CAMBER = 8.5        # Глубина вогнутости лопасти внутрь ("лодочка"), мм
+BLADE_THICK = 2.2         # Максимальная толщина лопасти в средней части профиля, мм
+BLADE_EDGE_THICK = 0.5    # Толщина лопасти у кромок, мм
+TWIST_DEG = -60.0          # Общая закрутка лопасти от низа к верху, градусы
+
+# ----------------------------------------------------------------------------
+# Центральная ось, ступицы и лучи
+# ----------------------------------------------------------------------------
+SHAFT_RADIUS = 4.0        # Радиус центральной оси, мм (4 мм => диаметр 8 мм)
+SHAFT_HEIGHT = 260.0      # Высота центральной оси, мм
+
+HUB_RADIUS = 16.0         # Радиус верхней и нижней ступицы, мм
+HUB_THICK = 8.0           # Толщина ступицы по Z, мм
+HUB_Z = (-90.0, 90.0)     # Положение нижней и верхней ступицы по Z, мм
+
+ARM_LEN = 55.0            # Длина луча от ступицы к лопасти, мм
+ARM_W = 8.0               # Ширина луча, мм
+ARM_H = 6.0               # Толщина луча по Z, мм
+
+# ----------------------------------------------------------------------------
+# Точность аппроксимации лопасти
+# ----------------------------------------------------------------------------
+NZ = 50                   # Количество сечений лопасти по высоте
+NX = 60                   # Количество точек в одном сечении лопасти
+
+# ============================================================================
+# ПАРАМЕТРЫ ВНУТРЕННИХ СЁДЕЛ КРЕПЛЕНИЯ
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Расположение рядов седел
+# ----------------------------------------------------------------------------
+ROW_EDGE_MARGIN = 26.0    # Отступ верхнего и нижнего ряда седел от краёв лопасти, мм
+ROW_ZS = [
+    -HEIGHT / 2.0 + ROW_EDGE_MARGIN,  # Нижний ряд седел
+    0.0,                              # Средний ряд седел
+    HEIGHT / 2.0 - ROW_EDGE_MARGIN,   # Верхний ряд седел
+]
+
+CHORD_OFFSETS = [-9.0, 9.0]  # Положение двух отверстий в одном седле по хорде лопасти, мм
+
+# ----------------------------------------------------------------------------
+# Геометрия седла
+# ----------------------------------------------------------------------------
+PAD_X_MARGIN = 6.0           # Добавка по ширине седла за пределы крайних отверстий, мм
+PAD_HEIGHT = 16.0            # Высота одного седла по Z, мм
+PAD_THICK = 5.8              # Максимальная толщина седла от внутренней поверхности лопасти внутрь, мм
+PAD_EMBED = 0.35             # Небольшое заглубление седла в mesh-лопасть для гарантированного контакта, мм
+
+# ----------------------------------------------------------------------------
+# Нижний и верхний пандус седла
+# ----------------------------------------------------------------------------
+PAD_BOTTOM_RAMP = 6.0        # Высота нижнего пандуса, мм
+PAD_BOTTOM_MIN_THICK = 0.8   # Толщина седла у самого нижнего края, мм
+
+PAD_TOP_RAMP = 6.0           # Высота верхнего пандуса, мм
+PAD_TOP_MIN_THICK = 0.8      # Толщина седла у самого верхнего края, мм
+
+# ----------------------------------------------------------------------------
+# Точность аппроксимации седла
+# ----------------------------------------------------------------------------
+PAD_NX = 18                  # Количество точек по ширине одного сечения седла
+PAD_NZ = 9                   # Количество сечений седла по высоте
+
+# ----------------------------------------------------------------------------
+# Глухие отверстия под латунные вставки / термовставки
+# ----------------------------------------------------------------------------
+INSERT_HOLE_DIAMETER = 4.6   # Диаметр отверстия под вставку, мм
+INSERT_HOLE_DEPTH = 2.8      # Номинальная глубина отверстия, мм
+MIN_CAP_TO_BLADE = 1.0       # Минимальный слой пластика между дном отверстия и стороной седла, прилегающей к лопасти, мм
+
+# Эти два параметра нужны, чтобы булево вычитание надёжно "открывало" отверстие наружу
+HOLE_EXTRA_START = 1.40      # Насколько отверстие начинается снаружи от лицевой поверхности седла, мм
+HOLE_EXTRA_DEPTH = 1.20      # Насколько отверстие режется глубже номинальной глубины, мм
+
+# ----------------------------------------------------------------------------
+# Вспомогательные маркеры центров отверстий
+# ----------------------------------------------------------------------------
+CREATE_MARKERS = False       # Создавать ли красные шарики-маркеры центров отверстий
+MARKER_RADIUS = 1.0          # Радиус красного маркера, мм
+
+# ----------------------------------------------------------------------------
+# Префиксы имён объектов
+# ----------------------------------------------------------------------------
+PAD_PREFIX = "BladeSaddles_"
+MARK_PREFIX = "SaddleMarkers_"
+
+# ============================================================================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ============================================================================
+
+def ensure_doc(name):
+    """Возвращает существующий документ по имени или создаёт новый."""
+    docs = App.listDocuments()
+    if name in docs:
+        return docs[name]
+    return App.newDocument(name)
+
+
+def clear_generated_objects(doc):
+    """Удаляет ранее созданные макросом объекты."""
+    prefixes = (
+        "Blade_",
+        "Hub_",
+        "Arm_",
+        "Shaft",
+        PAD_PREFIX,
+        MARK_PREFIX,
+    )
+
+    for obj in list(doc.Objects):
+        if obj.Name.startswith(prefixes) or obj.Label.startswith(prefixes):
+            try:
+                doc.removeObject(obj.Name)
+            except Exception:
+                pass
+
+
+def v_add(a, b):
+    """Сложение двух 3D-векторов, заданных как кортежи."""
+    return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
+
+
+def v_sub(a, b):
+    """Вычитание двух 3D-векторов, заданных как кортежи."""
+    return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+
+def v_scale(v, s):
+    """Умножение 3D-вектора на скаляр."""
+    return (v[0] * s, v[1] * s, v[2] * s)
+
+
+def to_vec(v):
+    """Преобразование кортежа координат в App.Vector."""
+    return App.Vector(v[0], v[1], v[2])
+
+# ============================================================================
+# МАТЕМАТИКА ЛОПАСТИ
+# ============================================================================
+
+def blade_section_values(x_local):
+    """
+    Возвращает:
+    - yc: смещение средней линии профиля внутрь
+    - yt: локальную толщину профиля
+    """
+    xc = x_local / (BLADE_CHORD / 2.0)
+    xc = max(-1.0, min(1.0, xc))
+
+    yc = BLADE_CAMBER * (1.0 - xc * xc)
+    yt = BLADE_EDGE_THICK + (BLADE_THICK - BLADE_EDGE_THICK) * (1.0 - abs(xc) ** 1.5)
+
+    return yc, yt
+
+
+def blade_frame(phase_deg, z):
+    """
+    Возвращает локальную систему координат лопасти на высоте z:
+    - center: центр сечения
+    - tang: направление хорды
+    - inward: направление внутрь ротора
+    """
+    frac = (z + HEIGHT / 2.0) / HEIGHT
+    phi = math.radians(phase_deg) + math.radians(TWIST_DEG) * (frac - 0.5)
+
+    tang = (-math.sin(phi), math.cos(phi), 0.0)
+    inward = (-math.cos(phi), -math.sin(phi), 0.0)
+    center = (BLADE_RADIUS * math.cos(phi), BLADE_RADIUS * math.sin(phi), z)
+
+    return center, tang, inward
+
+
+def blade_inner_surface_point(phase_deg, z, x_local):
+    """
+    Точка на внутренней поверхности лопасти в локальной координате x_local и на высоте z.
+    """
+    center, tang, inward = blade_frame(phase_deg, z)
+    yc, yt = blade_section_values(x_local)
+
+    p = v_add(center, v_add(v_scale(tang, x_local), v_scale(inward, yc + yt / 2.0)))
+    return p, tang, inward
+
+
+def blade_loops(phase_deg):
+    """
+    Создаёт набор замкнутых контуров по высоте, из которых строится mesh лопасти.
+    """
+    loops = []
+
+    xs = [-BLADE_CHORD / 2.0 + i * (BLADE_CHORD / float(NX - 1)) for i in range(NX)]
+    zs = [-HEIGHT / 2.0 + i * (HEIGHT / float(NZ - 1)) for i in range(NZ)]
+
+    for z in zs:
+        center, tang, inward = blade_frame(phase_deg, z)
+        loop = []
+
+        # Верхняя половина профиля
+        for x in xs:
+            yc, yt = blade_section_values(x)
+            p = v_add(center, v_add(v_scale(tang, x), v_scale(inward, yc + yt / 2.0)))
+            loop.append(p)
+
+        # Нижняя половина профиля
+        for x in reversed(xs):
+            yc, yt = blade_section_values(x)
+            p = v_add(center, v_add(v_scale(tang, x), v_scale(inward, yc - yt / 2.0)))
+            loop.append(p)
+
+        loops.append(loop)
+
+    return loops
+
+
+def make_blade_mesh(phase_deg):
+    """
+    Строит mesh одной лопасти как набор треугольников.
+    """
+    loops = blade_loops(phase_deg)
+    nloop = len(loops[0])
+    facets = []
+
+    def vertex(loop_index, point_index):
+        return loops[loop_index][point_index % nloop]
+
+    # Боковая поверхность
+    for iz in range(len(loops) - 1):
+        for j in range(nloop):
+            a = vertex(iz, j)
+            b = vertex(iz, j + 1)
+            c = vertex(iz + 1, j)
+            d = vertex(iz + 1, j + 1)
+
+            facets.append((App.Vector(*a), App.Vector(*c), App.Vector(*b)))
+            facets.append((App.Vector(*b), App.Vector(*c), App.Vector(*d)))
+
+    # Нижняя крышка
+    bot_center = (
+        sum(p[0] for p in loops[0]) / nloop,
+        sum(p[1] for p in loops[0]) / nloop,
+        sum(p[2] for p in loops[0]) / nloop,
+    )
+    for j in range(nloop):
+        a = vertex(0, j)
+        b = vertex(0, j + 1)
+        facets.append((App.Vector(*bot_center), App.Vector(*b), App.Vector(*a)))
+
+    # Верхняя крышка
+    top_center = (
+        sum(p[0] for p in loops[-1]) / nloop,
+        sum(p[1] for p in loops[-1]) / nloop,
+        sum(p[2] for p in loops[-1]) / nloop,
+    )
+    for j in range(nloop):
+        a = vertex(len(loops) - 1, j)
+        b = vertex(len(loops) - 1, j + 1)
+        facets.append((App.Vector(*top_center), App.Vector(*a), App.Vector(*b)))
+
+    return Mesh.Mesh(facets)
+
+# ============================================================================
+# МАТЕМАТИКА СЕДЛА
+# ============================================================================
+
+def local_pad_thickness(z_local_from_bottom):
+    """
+    Возвращает локальную толщину седла на заданной высоте внутри седла.
+    Толщина уменьшается у нижнего и верхнего края, образуя пандусы.
+    """
+    thickness = PAD_THICK
+
+    # Нижний пандус
+    if PAD_BOTTOM_RAMP > 0:
+        if z_local_from_bottom <= 0:
+            thickness = min(thickness, PAD_BOTTOM_MIN_THICK)
+        elif z_local_from_bottom < PAD_BOTTOM_RAMP:
+            k = z_local_from_bottom / PAD_BOTTOM_RAMP
+            bottom_t = PAD_BOTTOM_MIN_THICK + k * (PAD_THICK - PAD_BOTTOM_MIN_THICK)
+            thickness = min(thickness, bottom_t)
+
+    # Верхний пандус
+    if PAD_TOP_RAMP > 0:
+        dist_from_top = PAD_HEIGHT - z_local_from_bottom
+        if dist_from_top <= 0:
+            thickness = min(thickness, PAD_TOP_MIN_THICK)
+        elif dist_from_top < PAD_TOP_RAMP:
+            k = dist_from_top / PAD_TOP_RAMP
+            top_t = PAD_TOP_MIN_THICK + k * (PAD_THICK - PAD_TOP_MIN_THICK)
+            thickness = min(thickness, top_t)
+
+    return thickness
+
+
+def make_closed_section_wire(phase_deg, z, z_center, x_left, x_right):
+    """
+    Создаёт одно замкнутое сечение седла на высоте z.
+    Внутренняя сторона повторяет кривизну лопасти,
+    внешняя сторона смещена внутрь ротора на локальную толщину.
+    """
+    z0 = z_center - PAD_HEIGHT / 2.0
+    t_local = local_pad_thickness(z - z0)
+
+    pts_inner = []
+    pts_outer = []
+
+    for i in range(PAD_NX):
+        a = float(i) / float(PAD_NX - 1)
+        x = x_left + (x_right - x_left) * a
+
+        p, tang, inward = blade_inner_surface_point(phase_deg, z, x)
+        p_inner = v_sub(p, v_scale(inward, PAD_EMBED))
+        p_outer = v_add(p_inner, v_scale(inward, t_local))
+
+        pts_inner.append(to_vec(p_inner))
+        pts_outer.append(to_vec(p_outer))
+
+    poly = []
+    poly.extend(pts_inner)
+    poly.extend(reversed(pts_outer))
+    poly.append(pts_inner[0])
+
+    return Part.makePolygon(poly)
+
+
+def make_saddle_solid(phase_deg, z_center):
+    """
+    Создаёт одно седло как loft из нескольких сечений,
+    а затем вычитает два глухих отверстия.
+    """
+    x_left = min(CHORD_OFFSETS) - PAD_X_MARGIN
+    x_right = max(CHORD_OFFSETS) + PAD_X_MARGIN
+
+    if INSERT_HOLE_DEPTH > PAD_THICK - MIN_CAP_TO_BLADE:
+        raise RuntimeError(
+            "INSERT_HOLE_DEPTH слишком велик для текущего PAD_THICK. "
+            "Увеличьте PAD_THICK или уменьшите INSERT_HOLE_DEPTH."
+        )
+
+    z0 = z_center - PAD_HEIGHT / 2.0
+    z1 = z_center + PAD_HEIGHT / 2.0
+
+    wires = []
+    for iz in range(PAD_NZ):
+        tz = float(iz) / float(PAD_NZ - 1)
+        z = z0 + (z1 - z0) * tz
+        wires.append(make_closed_section_wire(phase_deg, z, z_center, x_left, x_right))
+
+    shape = Part.makeLoft(wires, True, False)
+
+    # Два глухих отверстия
+    for x_local in CHORD_OFFSETS:
+        p, tang, inward = blade_inner_surface_point(phase_deg, z_center, x_local)
+        p_inner = v_sub(p, v_scale(inward, PAD_EMBED))
+        face_point = v_add(p_inner, v_scale(inward, PAD_THICK))
+
+        hole_start = v_add(face_point, v_scale(inward, HOLE_EXTRA_START))
+        hole_dir = to_vec(v_scale(inward, -1.0))
+
+        hole = Part.makeCylinder(
+            INSERT_HOLE_DIAMETER / 2.0,
+            INSERT_HOLE_DEPTH + HOLE_EXTRA_START + HOLE_EXTRA_DEPTH,
+            to_vec(hole_start),
+            hole_dir
+        )
+
+        shape = shape.cut(hole)
+
+    return shape
+
+
+def make_marker_shape(phase_deg, z_center):
+    """
+    Создаёт два красных шарика-маркера центров отверстий.
+    Полезно только для отладки.
+    """
+    markers = []
+
+    for x_local in CHORD_OFFSETS:
+        p, tang, inward = blade_inner_surface_point(phase_deg, z_center, x_local)
+        p_inner = v_sub(p, v_scale(inward, PAD_EMBED))
+        p_face = v_add(p_inner, v_scale(inward, PAD_THICK))
+
+        markers.append(Part.makeSphere(MARKER_RADIUS, to_vec(p_face)))
+
+    return Part.makeCompound(markers)
+
+# ============================================================================
+# ГЕНЕРАЦИЯ РОТОРА
+# ============================================================================
+
+def build_rotor(doc):
+    """Создаёт лопасти, ось, ступицы и лучи."""
+    # Лопасти
+    for i in range(NUM_BLADES):
+        phase = i * (360.0 / NUM_BLADES)
+        mesh = make_blade_mesh(phase)
+
+        obj = doc.addObject("Mesh::Feature", "Blade_%d" % (i + 1))
+        obj.Mesh = mesh
+
+    # Центральная ось
+    shaft = doc.addObject("Part::Cylinder", "Shaft")
+    shaft.Radius = SHAFT_RADIUS
+    shaft.Height = SHAFT_HEIGHT
+    shaft.Placement.Base = App.Vector(0, 0, -SHAFT_HEIGHT / 2.0)
+
+    # Ступицы и лучи
+    for hub_index, z in enumerate(HUB_Z, start=1):
+        hub = doc.addObject("Part::Cylinder", "Hub_%d" % hub_index)
+        hub.Radius = HUB_RADIUS
+        hub.Height = HUB_THICK
+        hub.Placement.Base = App.Vector(0, 0, z - HUB_THICK / 2.0)
+
+        for blade_index in range(NUM_BLADES):
+            arm = doc.addObject("Part::Box", "Arm_%d_%d" % (hub_index, blade_index + 1))
+            arm.Length = ARM_LEN
+            arm.Width = ARM_W
+            arm.Height = ARM_H
+            arm.Placement.Base = App.Vector(0, -ARM_W / 2.0, z - ARM_H / 2.0)
+
+            angle_deg = blade_index * (360.0 / NUM_BLADES) + ((z + 90.0) / 180.0) * TWIST_DEG - 45.0
+            arm.Placement.Rotation = App.Rotation(App.Vector(0, 0, 1), angle_deg)
+
+# ============================================================================
+# ГЕНЕРАЦИЯ СЁДЕЛ
+# ============================================================================
+
+def build_saddles(doc):
+    """Создаёт седла крепления на каждой лопасти."""
+    created = 0
+
+    for blade_index in range(NUM_BLADES):
+        phase = blade_index * (360.0 / NUM_BLADES)
+
+        pad_shapes = []
+        marker_shapes = []
+
+        for zc in ROW_ZS:
+            pad_shapes.append(make_saddle_solid(phase, zc))
+            created += 1
+
+            if CREATE_MARKERS:
+                marker_shapes.append(make_marker_shape(phase, zc))
+
+        pad_obj = doc.addObject("Part::Feature", PAD_PREFIX + str(blade_index + 1))
+        pad_obj.Shape = Part.makeCompound(pad_shapes)
+        try:
+            pad_obj.ViewObject.ShapeColor = (0.85, 0.55, 0.20)
+        except Exception:
+            pass
+
+        if CREATE_MARKERS:
+            mark_obj = doc.addObject("Part::Feature", MARK_PREFIX + str(blade_index + 1))
+            mark_obj.Shape = Part.makeCompound(marker_shapes)
+            try:
+                mark_obj.ViewObject.ShapeColor = (0.90, 0.10, 0.10)
+            except Exception:
+                pass
+
+    return created
+
+# ============================================================================
+# ОСНОВНОЙ ЗАПУСК
+# ============================================================================
+
+doc = ensure_doc(DOC_NAME)
+App.setActiveDocument(doc.Name)
+
+clear_generated_objects(doc)
+
+build_rotor(doc)
+created_saddles = build_saddles(doc)
+
+doc.recompute()
+
+try:
+    import FreeCADGui as Gui
+    Gui.ActiveDocument.ActiveView.fitAll()
+except Exception:
+    pass
+
+print("VAWT rotor created successfully.")
+print("Created %d saddle pads." % created_saddles)
