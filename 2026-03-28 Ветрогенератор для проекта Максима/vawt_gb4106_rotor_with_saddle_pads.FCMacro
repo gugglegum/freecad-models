@@ -103,6 +103,7 @@ PAD_NZ = 9                   # Количество сечений седла п
 # ----------------------------------------------------------------------------
 INSERT_HOLE_DIAMETER = 4.35   # Диаметр отверстия под вставку, мм
 INSERT_HOLE_DEPTH = 4.5      # Номинальная глубина отверстия, мм
+HUB_SET_SCREW_CLEAR_DIAMETER = 3.6  # Сквозное отверстие под установочный винт M3 в шайбе, мм
 MIN_CAP_TO_BLADE = 1.0       # Минимальный слой пластика между дном отверстия и стороной седла, прилегающей к лопасти, мм
 
 # Эти два параметра нужны, чтобы булево вычитание надёжно "открывало" отверстие наружу
@@ -708,6 +709,31 @@ def make_hub_row_shape(z_center):
         App.Vector(0, 0, 1)
     )
     shape = shape.cut(hub_bore)
+
+    hole_angle_step = 360.0 / NUM_BLADES
+    _, _, _, _, _, base_arm_angle_deg = mount_center_frame(0.0, z_center)
+    hole_start_radius = HUB_BORE_DIAMETER / 2.0 - HOLE_EXTRA_START
+    clear_hole_length = HUB_RADIUS - hole_start_radius + HOLE_EXTRA_DEPTH
+
+    for hole_index in range(NUM_BLADES):
+        angle = math.radians(base_arm_angle_deg + (hole_index + 0.5) * hole_angle_step)
+        radial = (math.cos(angle), math.sin(angle), 0.0)
+        start = v_scale(radial, hole_start_radius)
+        start = (start[0], start[1], z_center)
+
+        insert_hole = Part.makeCylinder(
+            INSERT_HOLE_DIAMETER / 2.0,
+            INSERT_HOLE_DEPTH + HOLE_EXTRA_START,
+            to_vec(start),
+            to_vec(radial)
+        )
+        clear_hole = Part.makeCylinder(
+            HUB_SET_SCREW_CLEAR_DIAMETER / 2.0,
+            clear_hole_length,
+            to_vec(start),
+            to_vec(radial)
+        )
+        shape = shape.cut(fuse_shapes([insert_hole, clear_hole]))
 
     try:
         shape = shape.removeSplitter()
