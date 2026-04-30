@@ -123,6 +123,13 @@ PAD_PREFIX = "BladeSaddles_"
 MARK_PREFIX = "SaddleMarkers_"
 HUB_MOUNT_PREFIX = "HubMount_"
 
+BLADE_COLOR = (0.94, 0.94, 0.90)
+HUB_ROW_COLOR = (0.22, 0.22, 0.22)
+HUB_MOUNT_COLOR = (1.00, 0.38, 0.03)
+SHAFT_COLOR = (0.72, 0.75, 0.74)
+SHAFT_SPECULAR_COLOR = (0.95, 0.95, 0.92)
+SHAFT_SHININESS = 0.80
+
 # ============================================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ============================================================================
@@ -753,7 +760,7 @@ def build_hub_rows(doc):
         obj = doc.addObject("Part::Feature", "HubRow_%d" % row_index)
         obj.Shape = make_hub_row_shape(z_center)
         try:
-            obj.ViewObject.ShapeColor = (0.60, 0.60, 0.60)
+            obj.ViewObject.ShapeColor = HUB_ROW_COLOR
         except Exception:
             pass
         created += 1
@@ -773,7 +780,7 @@ def build_hub_mounts(doc):
             obj = doc.addObject("Part::Feature", "%s%d_%d" % (HUB_MOUNT_PREFIX, row_index, blade_index + 1))
             obj.Shape = make_mount_solid(phase, z_center)
             try:
-                obj.ViewObject.ShapeColor = (0.45, 0.68, 0.84)
+                obj.ViewObject.ShapeColor = HUB_MOUNT_COLOR
             except Exception:
                 pass
             created += 1
@@ -793,12 +800,26 @@ def build_rotor(doc):
 
         obj = doc.addObject("Mesh::Feature", "Blade_%d" % (i + 1))
         obj.Mesh = mesh
+        try:
+            obj.ViewObject.ShapeColor = BLADE_COLOR
+        except Exception:
+            pass
 
     # Центральная ось
     shaft = doc.addObject("Part::Cylinder", "Shaft")
     shaft.Radius = SHAFT_RADIUS
     shaft.Height = SHAFT_HEIGHT
     shaft.Placement.Base = App.Vector(0, 0, -SHAFT_HEIGHT / 2.0)
+    try:
+        shaft.ViewObject.ShapeColor = SHAFT_COLOR
+        mat = shaft.ViewObject.ShapeAppearance[0]
+        mat.DiffuseColor = (SHAFT_COLOR[0], SHAFT_COLOR[1], SHAFT_COLOR[2], 1.0)
+        mat.AmbientColor = (0.35, 0.36, 0.36, 1.0)
+        mat.SpecularColor = (SHAFT_SPECULAR_COLOR[0], SHAFT_SPECULAR_COLOR[1], SHAFT_SPECULAR_COLOR[2], 1.0)
+        mat.Shininess = SHAFT_SHININESS
+        shaft.ViewObject.ShapeAppearance = (mat,)
+    except Exception:
+        pass
 
 # ============================================================================
 # ГЕНЕРАЦИЯ СЁДЕЛ
@@ -824,7 +845,7 @@ def build_saddles(doc):
         pad_obj = doc.addObject("Part::Feature", PAD_PREFIX + str(blade_index + 1))
         pad_obj.Shape = Part.makeCompound(pad_shapes)
         try:
-            pad_obj.ViewObject.ShapeColor = (0.85, 0.55, 0.20)
+            pad_obj.ViewObject.ShapeColor = BLADE_COLOR
         except Exception:
             pass
 
