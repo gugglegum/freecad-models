@@ -1,0 +1,452 @@
+# -*- coding: utf-8 -*-
+"""
+FreeCAD 1.1 macro: wall holder for a GROHE 27512001 hygiene shower.
+
+Coordinate system:
+    X - away from the wall
+    Y - horizontal along the wall
+    Z - vertical
+
+The hose connector is retained by a tapered C-shaped socket.  The socket is
+open at the top and toward the free end of the arm, so the hose can be moved
+sideways into the holder and the connector can then be lowered into its seat.
+One central round-head screw fixes the flat rear face directly to the wall.
+
+Run in FreeCAD with Macro -> Macros... -> Execute.
+The macro creates a new document, saves an FCStd file, and exports the final
+solid as STL next to this macro.
+"""
+
+import os
+
+import FreeCAD as App
+import Part
+
+
+# =============================================================================
+# USER PARAMETERS (all linear dimensions are millimetres)
+# =============================================================================
+
+# Measured hose connector
+MEASURED_TOP_DIAMETER = 23.05
+MEASURED_BOTTOM_DIAMETER = 20.30
+MEASURED_CONNECTOR_HEIGHT = 30.00
+
+# Requested allowance:
+# 0.4 mm diametral printer compensation + 0.8 mm diametral free clearance.
+PRINTER_DIAMETER_COMPENSATION = 0.40
+FREE_DIAMETER_CLEARANCE = 0.80
+
+# Main arm.  The straight part plus the hemispherical end projects 60 mm from
+# the wall: 45 + 15 = 60.
+ARM_DIAMETER = 30.00
+ARM_STRAIGHT_LENGTH = 40.00
+
+# Distance from the very tip of the rounded arm to the socket axis.
+# Increase this value to make the socket sit deeper in the holder.
+SOCKET_AXIS_FROM_TIP = 12.00
+
+# Width of the side entry channel.  It must be wider than the flexible hose,
+# but narrower than the lower end of the connector (21.50 mm by default).
+SIDE_ENTRY_WIDTH = 16.00
+
+# Central stepped channel for one pan/round-head wall screw.  The 8 mm well
+# starts at the free end and stops 6 mm short of the wall.  Its bottom is a
+# flat annular shoulder.  A 5 mm clearance hole crosses the final 6 mm.
+SCREW_WELL_DIAMETER = 8.0
+SCREW_THROUGH_DIAMETER = 5.00
+SCREW_SHOULDER_FROM_WALL = 6.00
+
+# Two-stage rounding of the socket entry:
+# 1. A swept round cutter follows both near-vertical throat edges.  Spherical
+#    end caps remove the angular tips that a normal fillet leaves behind.
+# 2. A conventional transverse fillet rounds the remaining connected rim.
+# Set either value to 0 to disable that stage.
+VERTICAL_EDGE_ROUND_RADIUS = 3.90
+TRANSVERSE_EDGE_FILLET_RADIUS = 0.9
+
+# Output
+SAVE_FCSTD = True
+EXPORT_STL = True
+OUTPUT_BASENAME = "Grohe_27512001_wall_holder"
+
+
+# =============================================================================
+# DERIVED DIMENSIONS AND VALIDATION
+# =============================================================================
+
+DIAMETER_ALLOWANCE = (
+    PRINTER_DIAMETER_COMPENSATION + FREE_DIAMETER_CLEARANCE
+)
+SOCKET_TOP_DIAMETER = MEASURED_TOP_DIAMETER + DIAMETER_ALLOWANCE
+SOCKET_BOTTOM_DIAMETER = MEASURED_BOTTOM_DIAMETER + DIAMETER_ALLOWANCE
+SOCKET_HEIGHT = MEASURED_CONNECTOR_HEIGHT
+
+ARM_RADIUS = ARM_DIAMETER / 2.0
+SOCKET_TOP_RADIUS = SOCKET_TOP_DIAMETER / 2.0
+SOCKET_BOTTOM_RADIUS = SOCKET_BOTTOM_DIAMETER / 2.0
+
+
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+
+require(ARM_DIAMETER > SOCKET_TOP_DIAMETER,
+        "ARM_DIAMETER must exceed SOCKET_TOP_DIAMETER.")
+require(SIDE_ENTRY_WIDTH < SOCKET_BOTTOM_DIAMETER,
+        "SIDE_ENTRY_WIDTH must be smaller than the lower socket diameter.")
+require(SIDE_ENTRY_WIDTH > 0.0, "SIDE_ENTRY_WIDTH must be positive.")
+require(SCREW_WELL_DIAMETER > SCREW_THROUGH_DIAMETER,
+        "SCREW_WELL_DIAMETER must exceed SCREW_THROUGH_DIAMETER.")
+require(SCREW_WELL_DIAMETER < ARM_DIAMETER,
+        "SCREW_WELL_DIAMETER must be smaller than ARM_DIAMETER.")
+require(0.0 < SCREW_SHOULDER_FROM_WALL < ARM_STRAIGHT_LENGTH,
+        "SCREW_SHOULDER_FROM_WALL is outside the arm.")
+require(VERTICAL_EDGE_ROUND_RADIUS >= 0.0,
+        "VERTICAL_EDGE_ROUND_RADIUS cannot be negative.")
+require(TRANSVERSE_EDGE_FILLET_RADIUS >= 0.0,
+        "TRANSVERSE_EDGE_FILLET_RADIUS cannot be negative.")
+
+
+# =============================================================================
+# DOCUMENT HELPERS
+# =============================================================================
+
+def unique_document_name(base_name):
+    """Avoid closing or overwriting any already-open FreeCAD document."""
+    name = base_name
+    suffix = 2
+    while name in App.listDocuments():
+        name = "{}_{}".format(base_name, suffix)
+        suffix += 1
+    return name
+
+
+def add_length_property(obj, name, value, group, description):
+    obj.addProperty("App::PropertyLength", name, group, description)
+    setattr(obj, name, value)
+    obj.setEditorMode(name, 1)  # Display-only: edit constants above and rerun.
+
+
+def edge_rounding_cutter(edge, radius):
+    """Create a round swept cutter with spherical caps along one edge."""
+    start = edge.valueAt(edge.FirstParameter)
+    tangent = edge.tangentAt(edge.FirstParameter)
+    profile_edge = Part.makeCircle(radius, start, tangent)
+    profile = Part.Wire([profile_edge])
+    spine = Part.Wire([edge])
+    pipe = spine.makePipeShell([profile], True, False)
+
+    # A normal fillet tapers awkwardly at these vertices.  Spherical caps make
+    # both ends of the swept relief smooth in every direction.
+    for vertex in edge.Vertexes:
+        pipe = pipe.fuse(Part.makeSphere(radius, vertex.Point))
+    return pipe.removeSplitter()
+
+
+# =============================================================================
+# BUILD THE HOLDER
+# =============================================================================
+
+doc = App.newDocument(unique_document_name("Grohe_27512001_Holder"))
+
+# Horizontal cylindrical arm with a hemispherical free end.
+arm_start_x = 0.0
+sphere_center_x = ARM_STRAIGHT_LENGTH
+tip_x = sphere_center_x + ARM_RADIUS
+
+arm_cylinder = Part.makeCylinder(
+    ARM_RADIUS,
+    sphere_center_x - arm_start_x,
+    App.Vector(arm_start_x, 0.0, 0.0),
+    App.Vector(1.0, 0.0, 0.0),
+)
+rounded_end = Part.makeSphere(
+    ARM_RADIUS,
+    App.Vector(sphere_center_x, 0.0, 0.0),
+)
+arm_blank = arm_cylinder.fuse(rounded_end).removeSplitter()
+
+# Tapered socket.  Extend it 1 mm beyond the arm at both top and bottom to
+# guarantee clean through-openings after the boolean cut.
+socket_axis_x = tip_x - SOCKET_AXIS_FROM_TIP
+socket_overcut = 1.00
+radius_slope = (
+    (SOCKET_TOP_RADIUS - SOCKET_BOTTOM_RADIUS) / SOCKET_HEIGHT
+)
+extended_bottom_radius = (
+    SOCKET_BOTTOM_RADIUS - radius_slope * socket_overcut
+)
+extended_top_radius = SOCKET_TOP_RADIUS + radius_slope * socket_overcut
+extended_socket_height = SOCKET_HEIGHT + 2.0 * socket_overcut
+
+socket_cutter = Part.makeCone(
+    extended_bottom_radius,
+    extended_top_radius,
+    extended_socket_height,
+    App.Vector(socket_axis_x, 0.0, -SOCKET_HEIGHT / 2.0 - socket_overcut),
+    App.Vector(0.0, 0.0, 1.0),
+)
+
+# Side entry channel.  It removes the front half of the socket toward the
+# rounded tip, leaving two retention lips narrower than the connector.
+entry_overcut = 2.0
+entry_channel = Part.makeBox(
+    tip_x - socket_axis_x + entry_overcut,
+    SIDE_ENTRY_WIDTH,
+    ARM_DIAMETER + 2.0 * entry_overcut,
+    App.Vector(
+        socket_axis_x,
+        -SIDE_ENTRY_WIDTH / 2.0,
+        -ARM_RADIUS - entry_overcut,
+    ),
+)
+
+arm_cut = arm_blank.cut(socket_cutter.fuse(entry_channel))
+
+# Axial screw channel.  The large well is cylindrical (not countersunk) and
+# leaves a flat shoulder at X = SCREW_SHOULDER_FROM_WALL.  The smaller hole
+# passes through the remaining 6 mm to the wall face.
+screw_overcut = 1.0
+screw_well = Part.makeCylinder(
+    SCREW_WELL_DIAMETER / 2.0,
+    tip_x - SCREW_SHOULDER_FROM_WALL + screw_overcut,
+    App.Vector(SCREW_SHOULDER_FROM_WALL, 0.0, 0.0),
+    App.Vector(1.0, 0.0, 0.0),
+)
+screw_through_hole = Part.makeCylinder(
+    SCREW_THROUGH_DIAMETER / 2.0,
+    SCREW_SHOULDER_FROM_WALL + screw_overcut,
+    App.Vector(-screw_overcut, 0.0, 0.0),
+    App.Vector(1.0, 0.0, 0.0),
+)
+holder_shape = arm_cut.cut(
+    screw_well.fuse(screw_through_hole)
+).removeSplitter()
+
+# Stage 1: strongly round the two near-vertical throat edges with swept
+# cylindrical reliefs and spherical end caps.  This avoids the pointed end
+# patches produced by applying a conventional fillet to the complete rim.
+if VERTICAL_EDGE_ROUND_RADIUS > 0.0:
+    vertical_edges = []
+    throat_y = SIDE_ENTRY_WIDTH / 2.0
+    for edge in holder_shape.Edges:
+        box = edge.BoundBox
+        is_hyperbola = edge.Curve.TypeId == "Part::GeomHyperbola"
+        is_at_throat = abs(
+            abs(edge.CenterOfMass.y) - throat_y
+        ) < 0.20
+        is_near_vertical = (
+            box.ZLength > SOCKET_HEIGHT * 0.30
+            and box.YLength < 0.20
+        )
+        is_near_tip = box.XMin > socket_axis_x
+        if (
+            is_hyperbola
+            and is_at_throat
+            and is_near_vertical
+            and is_near_tip
+        ):
+            vertical_edges.append(edge)
+
+    require(len(vertical_edges) == 2,
+            "Expected exactly two vertical socket-throat edges.")
+
+    vertical_cutter = None
+    for edge in vertical_edges:
+        item = edge_rounding_cutter(
+            edge, VERTICAL_EDGE_ROUND_RADIUS
+        )
+        vertical_cutter = (
+            item if vertical_cutter is None
+            else vertical_cutter.fuse(item)
+        )
+    holder_shape = holder_shape.cut(vertical_cutter).removeSplitter()
+    require(holder_shape.isValid(),
+            "Vertical socket-edge rounding produced an invalid BRep.")
+
+# Stage 2: round the transverse connected rim.  Selection is geometric rather
+# than based on fragile edge numbers.  A few seed edges are sufficient because
+# OpenCASCADE propagates the fillet through the connected tangent chain.
+if TRANSVERSE_EDGE_FILLET_RADIUS > 0.0:
+    socket_edge_x_limit = (
+        socket_axis_x - SOCKET_TOP_RADIUS - 2.0
+    )
+    screw_edge_box_limit = SCREW_WELL_DIAMETER + 0.10
+    transverse_edges = []
+    for edge in holder_shape.Edges:
+        box = edge.BoundBox
+        is_near_socket = box.XMin > socket_edge_x_limit
+        has_x_span = box.XLength > 0.05
+        is_long_enough = edge.Length > 0.75
+        is_screw_well_edge = (
+            box.YLength <= screw_edge_box_limit
+            and box.ZLength <= screw_edge_box_limit
+        )
+        if (
+            is_near_socket
+            and has_x_span
+            and is_long_enough
+            and not is_screw_well_edge
+        ):
+            transverse_edges.append(edge)
+
+    require(len(transverse_edges) >= 2,
+            "No suitable transverse socket edges were found.")
+    holder_shape = holder_shape.makeFillet(
+        TRANSVERSE_EDGE_FILLET_RADIUS, transverse_edges
+    ).removeSplitter()
+
+require(not holder_shape.isNull(), "The final holder shape is null.")
+require(holder_shape.isValid(), "The final holder shape is not a valid BRep.")
+require(len(holder_shape.Solids) == 1,
+        "The final holder must contain exactly one connected solid.")
+
+
+# =============================================================================
+# DOCUMENT OBJECTS
+# =============================================================================
+
+holder_obj = doc.addObject("Part::Feature", "Holder_Final")
+holder_obj.Label = "GROHE 27512001 - final printable holder"
+holder_obj.Shape = holder_shape
+
+params = doc.addObject("App::FeaturePython", "Design_Parameters")
+params.Label = "Design parameters (edit macro constants, then rerun)"
+
+add_length_property(
+    params, "MeasuredTopDiameter", MEASURED_TOP_DIAMETER,
+    "Measured connector", "Measured diameter next to the shower handle."
+)
+add_length_property(
+    params, "MeasuredBottomDiameter", MEASURED_BOTTOM_DIAMETER,
+    "Measured connector", "Measured diameter next to the flexible hose."
+)
+add_length_property(
+    params, "ConnectorHeight", MEASURED_CONNECTOR_HEIGHT,
+    "Measured connector", "Measured height of the tapered connector."
+)
+add_length_property(
+    params, "SocketTopDiameter", SOCKET_TOP_DIAMETER,
+    "Generated socket", "Measured size plus printer and free clearances."
+)
+add_length_property(
+    params, "SocketBottomDiameter", SOCKET_BOTTOM_DIAMETER,
+    "Generated socket", "Measured size plus printer and free clearances."
+)
+add_length_property(
+    params, "SideEntryWidth", SIDE_ENTRY_WIDTH,
+    "Generated socket", "Width of the hose entry channel."
+)
+add_length_property(
+    params, "ArmDiameter", ARM_DIAMETER,
+    "Holder", "Outer diameter of the horizontal arm."
+)
+add_length_property(
+    params, "ProjectionFromWall", ARM_STRAIGHT_LENGTH + ARM_RADIUS,
+    "Holder", "Nominal distance from the wall to the rounded tip."
+)
+add_length_property(
+    params, "ScrewWellDiameter", SCREW_WELL_DIAMETER,
+    "Wall mounting", "Deep cylindrical well for the screw head."
+)
+add_length_property(
+    params, "ScrewThroughDiameter", SCREW_THROUGH_DIAMETER,
+    "Wall mounting", "Through-hole diameter for the screw shank."
+)
+add_length_property(
+    params, "ScrewShoulderFromWall", SCREW_SHOULDER_FROM_WALL,
+    "Wall mounting", "Thickness under the flat screw-head shoulder."
+)
+add_length_property(
+    params, "VerticalEdgeRoundRadius", VERTICAL_EDGE_ROUND_RADIUS,
+    "Holder", "Swept rounding radius along the two throat edges."
+)
+add_length_property(
+    params, "TransverseEdgeFilletRadius",
+    TRANSVERSE_EDGE_FILLET_RADIUS,
+    "Holder", "Fillet radius around the connected transverse rim."
+)
+
+params.addProperty(
+    "App::PropertyString",
+    "FitDescription",
+    "Generated socket",
+    "Explanation of the fit allowance.",
+)
+params.FitDescription = (
+    "Top {:.2f} mm / bottom {:.2f} mm: measured + {:.2f} mm printer "
+    "+ {:.2f} mm free diametral clearance."
+).format(
+    SOCKET_TOP_DIAMETER,
+    SOCKET_BOTTOM_DIAMETER,
+    PRINTER_DIAMETER_COMPENSATION,
+    FREE_DIAMETER_CLEARANCE,
+)
+params.setEditorMode("FitDescription", 1)
+
+# A hidden reference connector shows the nominal measured metal part.  Toggle
+# visibility in the tree to inspect the designed clearance.
+reference_obj = doc.addObject("Part::Feature", "Measured_Connector_Reference")
+reference_obj.Label = "Measured connector reference (hidden)"
+reference_obj.Shape = Part.makeCone(
+    MEASURED_BOTTOM_DIAMETER / 2.0,
+    MEASURED_TOP_DIAMETER / 2.0,
+    MEASURED_CONNECTOR_HEIGHT,
+    App.Vector(socket_axis_x, 0.0, -MEASURED_CONNECTOR_HEIGHT / 2.0),
+    App.Vector(0.0, 0.0, 1.0),
+)
+
+doc.recompute()
+
+
+# =============================================================================
+# DISPLAY AND OUTPUT
+# =============================================================================
+
+try:
+    import FreeCADGui as Gui
+
+    holder_obj.ViewObject.ShapeColor = (0.82, 0.82, 0.86)
+    holder_obj.ViewObject.LineColor = (0.20, 0.20, 0.20)
+    reference_obj.ViewObject.ShapeColor = (0.20, 0.55, 0.95)
+    reference_obj.ViewObject.Transparency = 70
+    reference_obj.ViewObject.Visibility = False
+
+    Gui.activeDocument().activeView().viewAxonometric()
+    Gui.activeDocument().activeView().fitAll()
+except Exception:
+    # FreeCADCmd has no GUI module; geometry and exports still work.
+    pass
+
+try:
+    macro_path = os.path.abspath(__file__)
+    output_directory = os.path.dirname(macro_path)
+except NameError:
+    output_directory = os.getcwd()
+
+fcstd_path = os.path.join(output_directory, OUTPUT_BASENAME + ".FCStd")
+stl_path = os.path.join(output_directory, OUTPUT_BASENAME + ".stl")
+
+if SAVE_FCSTD:
+    doc.recompute()
+    doc.saveAs(fcstd_path)
+
+if EXPORT_STL:
+    import Mesh
+    Mesh.export([holder_obj], stl_path)
+
+App.Console.PrintMessage(
+    "\nGROHE 27512001 holder created successfully.\n"
+    "Socket diameters: top {:.2f} mm, bottom {:.2f} mm.\n"
+    "Final solid volume: {:.1f} mm^3.\n"
+    "FCStd: {}\n"
+    "STL: {}\n\n".format(
+        SOCKET_TOP_DIAMETER,
+        SOCKET_BOTTOM_DIAMETER,
+        holder_shape.Volume,
+        fcstd_path if SAVE_FCSTD else "(saving disabled)",
+        stl_path if EXPORT_STL else "(export disabled)",
+    )
+)
