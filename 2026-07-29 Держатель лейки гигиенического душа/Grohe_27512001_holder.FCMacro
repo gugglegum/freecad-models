@@ -35,7 +35,7 @@ MEASURED_CONNECTOR_HEIGHT = 30.00
 # Requested allowance:
 # 0.4 mm diametral printer compensation + 0.8 mm diametral free clearance.
 PRINTER_DIAMETER_COMPENSATION = 0.40
-FREE_DIAMETER_CLEARANCE = 0.80
+FREE_DIAMETER_CLEARANCE = 0.10
 
 # Main arm.  The straight part plus the hemispherical end projects 60 mm from
 # the wall: 45 + 15 = 60.
@@ -48,12 +48,12 @@ SOCKET_AXIS_FROM_TIP = 12.00
 
 # Width of the side entry channel.  It must be wider than the flexible hose,
 # but narrower than the lower end of the connector (21.50 mm by default).
-SIDE_ENTRY_WIDTH = 16.00
+SIDE_ENTRY_WIDTH = 12.00
 
 # Central stepped channel for one pan/round-head wall screw.  The 8 mm well
 # starts at the free end and stops 6 mm short of the wall.  Its bottom is a
 # flat annular shoulder.  A 5 mm clearance hole crosses the final 6 mm.
-SCREW_WELL_DIAMETER = 8.0
+SCREW_WELL_DIAMETER = 8.5
 SCREW_THROUGH_DIAMETER = 5.00
 SCREW_SHOULDER_FROM_WALL = 6.00
 
